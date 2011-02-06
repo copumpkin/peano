@@ -1,10 +1,10 @@
 {-# LANGUAGE GADTs, TypeFamilies, RankNTypes, EmptyDataDecls, ImplicitParams, GeneralizedNewtypeDeriving, 
              TypeOperators, FlexibleInstances, FlexibleContexts, MultiParamTypeClasses, OverlappingInstances, 
-             UndecidableInstances, StandaloneDeriving, RebindableSyntax #-}
+             UndecidableInstances, StandaloneDeriving, RebindableSyntax, PatternGuards #-}
 module PeanoTyped where
 
 import qualified Prelude
-import Prelude (Show, Maybe(..), Integer, id, (.), Bool(..), undefined)
+import Prelude (Show, Maybe(..), Integer, id, (.), Bool(..), undefined, (>>=), (>>), fail, error, const)
 
 import Structures
 
@@ -13,87 +13,111 @@ infix 4 :==
 infixl 6 :+
 infixl 7 :*
 
-
+-- Unnecessary but makes things simpler
+type family IsZero n :: *
+type instance IsZero Z = Zero
+type instance IsZero (S n) = Nonzero
 
 data Zero
-data Multiplicative
-
-data Z = Z
-newtype S n = S n
-
-data Fin n where
-  Fz :: Fin (S n)
-  Fs :: Fin n -> Fin (S n)
-
-deriving instance Show (Fin n)
-
-class (:<=) m n where
-  finj :: Fin m -> Fin n
-
-instance (:<=) n n where
-  finj = id
-
-instance (o ~ S n, m :<= n) => m :<= o where
-  finj = Fs . finj
+data Nonzero
+data Variable
+data MVariable
 
 
-data Expr m n where
-  Var  :: Fin n -> Expr m n
-  Con  :: Nat -> Expr m n
-  (:+) :: Expr m n -> Expr m n -> Expr m n
-  (:*) :: Expr m n -> Expr m n -> Expr Multiplicative n
+-- The two theories we know about, and which is harder
+data Presburger
+data Peano
 
-deriving instance Show (Expr m n)
+type family Difficulty a :: *
+type instance Difficulty Zero = Presburger
+type instance Difficulty Nonzero = Presburger
+type instance Difficulty Variable = Presburger
+type instance Difficulty MVariable = Peano
 
-instance Literal (Expr m n) where
-  fromInteger = Con . Nat
+-- Whether a given Presburger relation is normalized or not
+data Normal
+data Unnormal
 
-instance Semiring (Expr m n) where
-  type Multiply (Expr m n) = Expr Multiplicative n
-  zero = Con zero
-  one  = Con one
-  (+)  = (:+)
-  (*)  = (:*)
+-- "Difficulty" semilattices
+type family Harder a b :: *
+type instance Harder Presburger Presburger = Presburger
+type instance Harder Presburger Peano = Peano
+type instance Harder Peano Presburger = Peano
+type instance Harder Peano Peano = Peano
 
-data Rel m n where
-  (:==)  :: Expr m n -> Expr m n -> Rel m n
-  (:<)   :: Expr m n -> Expr m n -> Rel m n
+type family Plus n m :: *
+type instance Plus Zero Zero = Zero
+type instance Plus Zero Nonzero = Nonzero
+type instance Plus Zero Variable = Variable
+type instance Plus Zero MVariable = MVariable
+type instance Plus Nonzero Zero = Nonzero
+type instance Plus Nonzero Nonzero = Nonzero
+type instance Plus Nonzero Variable = Variable
+type instance Plus Nonzero MVariable = MVariable
+type instance Plus Variable Zero = Variable
+type instance Plus Variable Nonzero = Variable
+type instance Plus Variable Variable = Variable
+type instance Plus Variable MVariable = MVariable
+type instance Plus MVariable Zero = MVariable
+type instance Plus MVariable Nonzero = MVariable
+type instance Plus MVariable Variable = MVariable
+type instance Plus MVariable MVariable = MVariable
+
+type family Times n m :: *
+type instance Times Zero Zero = Zero
+type instance Times Zero Nonzero = Zero
+type instance Times Zero Variable = Zero
+type instance Times Zero MVariable = Zero
+type instance Times Nonzero Zero = Zero
+type instance Times Nonzero Nonzero = Nonzero
+type instance Times Nonzero Variable = Variable
+type instance Times Nonzero MVariable = MVariable
+type instance Times Variable Zero = Zero
+type instance Times Variable Nonzero = Variable
+type instance Times Variable Variable = MVariable
+type instance Times Variable MVariable = MVariable
+type instance Times MVariable Zero = Zero
+type instance Times MVariable Nonzero = MVariable
+type instance Times MVariable Variable = MVariable
+type instance Times MVariable MVariable = MVariable
+
+type Relation a b = Harder (Difficulty a) (Difficulty b)
+
+
+data Expr t n where
+  Var  :: Fin n -> Expr Variable n
+  Con  :: Nat q -> Expr (IsZero q) n
+  (:+) :: Expr t n -> Expr t' n -> Expr (Plus t t') n
+  (:*) :: Expr t n -> Expr t' n -> Expr (Times t t')  n
+
+deriving instance Show (Expr t n)
+
+data Rel t n where
+  (:==)  :: Expr t n -> Expr t' n -> Rel (Relation t t') n
+  (:<)   :: Expr t n -> Expr t' n -> Rel (Relation t t') n
+  (:<=)  :: Expr t n -> Expr t' n -> Rel (Relation t t') n
+  (:>=)  :: Expr t n -> Expr t' n -> Rel (Relation t t') n
+  (:>)   :: Expr t n -> Expr t' n -> Rel (Relation t t') n
   
-  (:&&)  :: Rel m n -> Rel m n -> Rel m n
-  (:||)  :: Rel m n -> Rel m n -> Rel m n
-  Not    :: Rel m n -> Rel m n
-  (:|)   :: Nat -> Expr m n -> Rel m n
+  (:&&)  :: Rel t n -> Rel t' n -> Rel (Harder t t') n
+  (:||)  :: Rel t n -> Rel t' n -> Rel (Harder t t') n
+  (:==>) :: Rel t n -> Rel t' n -> Rel (Harder t t') n
+  Xor    :: Rel t n -> Rel t' n -> Rel (Harder t t') n
   
-  Exists :: Rel m (S n) -> Rel m n
-  Forall :: Rel m (S n) -> Rel m n
+  (:|)   :: Nat (S x) -> Expr t n -> Rel t n
 
-deriving instance Show (Rel m n)
+  Not    :: Rel t n -> Rel t n  
+  Exists :: Rel t (S n) -> Rel t n
+  Forall :: Rel t (S n) -> Rel t n
 
-type instance Truth (Expr m n) = Rel m n
-
-instance BooleanAlgebra (Rel m n) where
-  -- I should probably just make primitive constructors here...
-  true  = exists (\x -> x == 0)
-  false = forall (\x -> x == 0)
-  
-  (&&) = (:&&)
-  (||) = (:||)
-  not  = Not
-
-instance Eq (Expr m n) where
-  (==) = (:==)
-
-instance Ord (Expr m n) where
-  (<) = (:<)
-  x <= y = x :< (y + 1)
-  x >= y = y :< (x + 1)
-  x > y = y < x
+deriving instance Show (Rel q n)
 
 
-cough :: (Fin (S n) -> Rel q n) -> Rel q n
+
+cough :: (Fin (S n) -> Rel t n) -> Rel t n
 cough f = f Fz
 
-binder :: (Rel q (S m) -> Rel q m) -> ((forall n. (S m :<= n) => Expr q n) -> Rel q (S m)) -> Rel q m
+binder :: (Rel t (S m) -> Rel t m) -> ((forall n. (S m :<= n) => Expr Variable n) -> Rel t (S m)) -> Rel t m
 binder b p = cough (\fz -> b (p (Var (finj fz))))
 
 forall = binder Forall
@@ -110,31 +134,48 @@ exists5 p = exists (\x -> exists4 (\y z a b -> p x y z a b))
 
 
 
-presburger :: Rel () Z -> Bool
-presburger = undefined
+cooper :: Rel Presburger Z -> Bool
+cooper (x :== y)  = undefined
+cooper (x :<  y)  = undefined
+cooper (x :&& y)  = undefined
+cooper (x :|| y)  = undefined
+cooper (x :|  y)  = undefined
+cooper (Not    x) = undefined
+cooper (Exists q) = undefined
+cooper (Forall q) = undefined
 
-prove :: Rel m Z -> Maybe Bool
-prove = undefined
 
+data TheoryWitness t where
+  Presburger :: TheoryWitness Presburger
+  Peano      :: TheoryWitness Peano
 
--- TODO: figure out how to make multiplication by a constant presburger-possible, but not multiplication by a variable
+class Theory t where
+  witness :: TheoryWitness t
 
-
-plusComm  = forall2 (\x y -> x + y == y + x)
-timesComm = forall2 (\x y -> x * y == y * x)
-
-plusAssoc  = forall3 (\x y z -> x + (y :+ z) == (x + y) + z)
-timesAssoc = forall3 (\x y z -> x * (y :* z) == (x * y) * z)
-
-plusLeftIdentity     = forall (\x -> 0 + x == x)
-timesLeftIdentity    = forall (\x -> 1 * x == x)
-timesLeftAnnihilator = forall (\x -> 0 * x == 0)
-
-plusTimesDistrib = forall3 (\x y z -> x * (y + z) == x * y + x * z)
-
-presburger1 = not (exists (\x -> 0 == x + 1))
-presburger2 = forall2 (\x y -> x + 1 == y + 1 ==> x == y)
-presburger3 = forall (\x -> x + 0 == x)
-presburger4 = forall2 (\x y -> (x + y) + 1 == x + (y + 1))
+instance Theory Presburger where
+  witness = Presburger
   
-zeroInitial = forall (\x -> 0 <= x)
+instance Theory Peano where
+  witness = Peano
+  
+theory :: Theory t => Rel t Z -> TheoryWitness t
+theory = const witness
+
+prove :: Theory m => Rel m Z -> Maybe Bool
+prove r | Presburger <- theory r = Just (cooper r)
+prove r = Nothing
+
+
+plusComm  = forall2 (\x y -> x :+ y :== y :+ x)
+timesComm = forall2 (\x y -> x :* y :== y :* x)
+
+
+plusAssoc  = forall3 (\x y z -> x :+ (y :+ z) :== (x :+ y) :+ z)
+timesAssoc = forall3 (\x y z -> x :* (y :* z) :== (x :* y) :* z)
+
+plusLeftIdentity     = forall (\x -> Con Zero :+ x :== x)
+timesLeftIdentity    = forall (\x -> Con (Suc 0) :* x :== x)
+timesLeftAnnihilator = forall (\x -> Con Zero :* x :== Con Zero)
+
+plusTimesDistrib = forall3 (\x y z -> x :* (y :+ z) :== x :* y :+ x :* z)
+  
